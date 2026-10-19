@@ -1,6 +1,5 @@
-import ast
-import json
 import sys
+import json
 from pathlib import Path
 
 # Ensure UTF-8 output on Windows terminal
@@ -10,6 +9,25 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
+
+# ─── Tree-sitter Language Bindings ────────────────────────────────────────────
+try:
+    from tree_sitter import Language, Parser
+    import tree_sitter_python
+    import tree_sitter_javascript
+    import tree_sitter_typescript
+
+    LANGUAGES = {
+        ".py": Language(tree_sitter_python.language()),
+        ".js": Language(tree_sitter_javascript.language()),
+        ".jsx": Language(tree_sitter_javascript.language()),
+        ".ts": Language(tree_sitter_typescript.language_typescript()),
+        ".tsx": Language(tree_sitter_typescript.language_tsx()),
+    }
+except ImportError as e:
+    print(f"❌ Missing required tree-sitter packages: {e}")
+    print("👉 Run: pip install -r requirements.txt")
+    sys.exit(1)
 
 # ─── Token Counter ────────────────────────────────────────────────────────────
 try:
@@ -27,27 +45,44 @@ TARGET_FILE = Path("test_extracted_repo/Zoroji_Graph-RAG/Simple_rag/rag_pipeline
 OUTPUT_JSON = Path(__file__).parent / "temp.json"
 
 
-# ─── Statement-Level Recursive Splitter (for oversized functions) ─────────────
-def split_large_statement(stmt: ast.stmt, source_code: str, target_size: int = TARGET_SIZE) -> list[str]:
-    """If a single statement has a body (loops/ifs/try), split its children; otherwise line-slice."""
-    if hasattr(stmt, "body") and isinstance(stmt.body, list):
+def get_parser(language) -> Parser:
+    """Initialize Tree-sitter Parser supporting both 0.22+ and older APIs."""
+    try:
+        return Parser(language)
+    except TypeError:
+        p = Parser()
+        p.set_language(language)
+        return p
+
+
+def get_node_text(node, source_bytes: bytes) -> str:
+    """Extract raw text slice for a given Tree-sitter node."""
+    return source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+
+# ─── Statement-Level Recursive Splitter (Oversized Functions) ─────────────────
+def split_large_tree_node(node, source_bytes: bytes, target_size: int = TARGET_SIZE) -> list[str]:
+    """If a Tree-sitter statement node has children (loops, conditionals), split children."""
+    body_node = node.child_by_field_name("body") or node
+    children = [c for c in body_node.children if c.is_named]
+
+    if len(children) > 1:
         sub_chunks, curr = [], []
-        for s in stmt.body:
-            code = ast.get_source_segment(source_code, s) or ""
+        for child in children:
+            code = get_node_text(child, source_bytes)
             if curr and count_tokens("\n".join(curr) + "\n" + code) > target_size:
                 sub_chunks.append("\n".join(curr))
                 curr = []
             if count_tokens(code) > target_size:
-                sub_chunks.extend(split_large_statement(s, source_code, target_size))
+                sub_chunks.extend(split_large_tree_node(child, source_bytes, target_size))
             else:
                 curr.append(code)
         if curr:
             sub_chunks.append("\n".join(curr))
         return sub_chunks
 
-    # ponytail: indivisible statements (e.g. huge dict/literal) sliced by lines. Upgrade: AST sub-expression visitor.
-    stmt_code = ast.get_source_segment(source_code, stmt) or ""
-    lines = stmt_code.splitlines()
+    # ponytail: indivisible statements sliced by lines. Upgrade: sub-expression traversal.
+    lines = get_node_text(node, source_bytes).splitlines()
     sub_chunks, curr = [], []
     for line in lines:
         if curr and count_tokens("\n".join(curr) + "\n" + line) > target_size:
@@ -59,28 +94,32 @@ def split_large_statement(stmt: ast.stmt, source_code: str, target_size: int = T
     return sub_chunks
 
 
-# ─── Definition Chunker (Function / Method) ───────────────────────────────────
+# ─── Function & Method Chunker ────────────────────────────────────────────────
 def make_definition_chunks(
-    node: ast.FunctionDef | ast.AsyncFunctionDef,
-    source_code: str,
+    node,
+    source_bytes: bytes,
     file_path: Path,
     parent: str | None = None,
     target_size: int = TARGET_SIZE
 ) -> list[dict]:
-    func_code = ast.get_source_segment(source_code, node) or ""
+    func_code = get_node_text(node, source_bytes)
+    name_node = node.child_by_field_name("name")
+    func_name = get_node_text(name_node, source_bytes) if name_node else "anonymous"
+    qual_name = f"{parent}.{func_name}" if parent else func_name
+
+    start_line = node.start_point[0] + 1
+    end_line = node.end_point[0] + 1
     tokens = count_tokens(func_code)
-    qual_name = f"{parent}.{node.name}" if parent else node.name
 
     base_meta = {
         "type": "method" if parent else "function",
         "file_path": str(file_path),
         "name": qual_name,
         "parent": parent,
-        "start_line": node.lineno,
-        "end_line": getattr(node, "end_lineno", node.lineno),
+        "start_line": start_line,
+        "end_line": end_line,
     }
 
-    # Fits in single chunk
     if tokens <= target_size:
         return [{
             "code": func_code,
@@ -92,10 +131,13 @@ def make_definition_chunks(
             }
         }]
 
-    # Oversized -> split statements
+    # Oversized -> split statements in body
+    body_node = node.child_by_field_name("body")
+    statements = [c for c in body_node.children if c.is_named] if body_node else [node]
+
     chunks, curr = [], []
-    for stmt in node.body:
-        stmt_code = ast.get_source_segment(source_code, stmt) or ""
+    for stmt in statements:
+        stmt_code = get_node_text(stmt, source_bytes)
         stmt_tokens = count_tokens(stmt_code)
 
         if curr and count_tokens("\n".join(curr) + "\n" + stmt_code) > target_size:
@@ -103,7 +145,7 @@ def make_definition_chunks(
             curr = []
 
         if stmt_tokens > target_size:
-            chunks.extend(split_large_statement(stmt, source_code, target_size))
+            chunks.extend(split_large_tree_node(stmt, source_bytes, target_size))
         else:
             curr.append(stmt_code)
 
@@ -123,87 +165,118 @@ def make_definition_chunks(
 
 
 # ─── Class Overview Builder ───────────────────────────────────────────────────
-def make_class_overview(node: ast.ClassDef, source_code: str, file_path: Path) -> dict:
-    """Builds a lightweight structural overview: docstring, class attributes, and method signatures."""
-    docstring = ast.get_docstring(node) or ""
-    bases = [ast.get_source_segment(source_code, b) or "" for b in node.bases]
-    bases_str = f"({', '.join(bases)})" if bases else ""
+def make_class_overview(node, source_bytes: bytes, file_path: Path) -> tuple[dict, list]:
+    """Extracts lightweight class overview and returns (overview_chunk, list_of_method_nodes)."""
+    name_node = node.child_by_field_name("name")
+    class_name = get_node_text(name_node, source_bytes) if name_node else "UnnamedClass"
 
-    lines = [f"class {node.name}{bases_str}:"]
-    if docstring:
-        lines.append(f'    """{docstring.strip()}"""')
-
-    # Class-level attributes and method signatures
+    body_node = node.child_by_field_name("body")
+    lines = [f"class {class_name}:"]
+    method_nodes = []
     method_names = []
-    for item in node.body:
-        if isinstance(item, (ast.Assign, ast.AnnAssign)):
-            attr_code = ast.get_source_segment(source_code, item) or ""
-            if attr_code:
-                lines.append(f"    {attr_code.strip()}")
-        elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            method_names.append(item.name)
-            # Extract only the signature line (def foo(...):)
-            first_line = (ast.get_source_segment(source_code, item) or "").splitlines()[0]
-            lines.append(f"    {first_line.strip()} ...")
+
+    if body_node:
+        for child in body_node.children:
+            if not child.is_named:
+                continue
+
+            # Python: function_definition | JS/TS: method_definition
+            if child.type in ("function_definition", "method_definition"):
+                method_nodes.append(child)
+                m_name_node = child.child_by_field_name("name")
+                m_name = get_node_text(m_name_node, source_bytes) if m_name_node else "method"
+                method_names.append(m_name)
+                # Signature: first line of method
+                sig_line = get_node_text(child, source_bytes).splitlines()[0].strip()
+                lines.append(f"    {sig_line} ...")
+
+            # Class docstring or data member
+            elif child.type in ("expression_statement", "lexical_declaration", "variable_declaration", "field_definition"):
+                txt = get_node_text(child, source_bytes).strip()
+                # If multi-line docstring, capture first line
+                if "\n" in txt:
+                    txt = txt.splitlines()[0] + ' """...'
+                lines.append(f"    {txt}")
 
     overview_code = "\n".join(lines)
-    return {
+    overview_chunk = {
         "code": overview_code,
         "metadata": {
             "type": "class_overview",
             "file_path": str(file_path),
-            "name": node.name,
+            "name": class_name,
             "parent": None,
             "methods": method_names,
-            "start_line": node.lineno,
-            "end_line": getattr(node, "end_lineno", node.lineno),
+            "start_line": node.start_point[0] + 1,
+            "end_line": node.end_point[0] + 1,
             "token_count": count_tokens(overview_code),
             "chunk_index": 1,
             "total_chunks": 1,
         }
     }
+    return overview_chunk, method_nodes
 
 
-# ─── Core Pipeline Runner ─────────────────────────────────────────────────────
-def chunk_file(file_path: Path, target_size: int = TARGET_SIZE) -> list[dict]:
-    source = file_path.read_text(encoding="utf-8", errors="replace")
-    tree = ast.parse(source)
+# ─── Main Polyglot Tree-Sitter Chunker ─────────────────────────────────────────
+def chunk_with_tree_sitter(file_path: Path, target_size: int = TARGET_SIZE) -> list[dict]:
+    suffix = file_path.suffix.lower()
+    language = LANGUAGES.get(suffix)
+
+    if language is None:
+        raise ValueError(f"Unsupported language extension: {suffix}")
+
+    parser = get_parser(language)
+    source_bytes = file_path.read_bytes()
+    tree = parser.parse(source_bytes)
+    root = tree.root_node
 
     imports_nodes = []
     globals_nodes = []
     chunks = []
 
-    for node in tree.body:
+    # Node types mapping across Python & JavaScript/TypeScript
+    IMPORT_TYPES = {"import_statement", "import_from_statement"}
+    GLOBAL_TYPES = {"expression_statement", "lexical_declaration", "variable_declaration"}
+    CLASS_TYPES = {"class_definition", "class_declaration"}
+    FUNCTION_TYPES = {"function_definition", "function_declaration", "arrow_function"}
+
+    for child in root.children:
+        if not child.is_named:
+            continue
+
         # A. Imports
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            imports_nodes.append(node)
+        if child.type in IMPORT_TYPES:
+            imports_nodes.append(child)
 
-        # B. Global variables & constants
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            globals_nodes.append(node)
+        # B. Classes
+        elif child.type in CLASS_TYPES:
+            class_overview, methods = make_class_overview(child, source_bytes, file_path)
+            chunks.append(class_overview)
+            c_name = class_overview["metadata"]["name"]
 
-        # C. Classes
-        elif isinstance(node, ast.ClassDef):
-            # 1. Class overview chunk (API surface without method bodies)
-            chunks.append(make_class_overview(node, source, file_path))
+            for m_node in methods:
+                chunks.extend(
+                    make_definition_chunks(m_node, source_bytes, file_path, parent=c_name, target_size=target_size)
+                )
 
-            # 2. Methods as individual definition chunks
-            for child in node.body:
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    chunks.extend(
-                        make_definition_chunks(child, source, file_path, parent=node.name, target_size=target_size)
-                    )
-
-        # D. Top-level standalone functions
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        # C. Top-level Functions
+        elif child.type in FUNCTION_TYPES:
             chunks.extend(
-                make_definition_chunks(node, source, file_path, parent=None, target_size=target_size)
+                make_definition_chunks(child, source_bytes, file_path, parent=None, target_size=target_size)
             )
 
-    # E. Emit file-level chunks
+        # D. Global Variables / Assignments
+        elif child.type in GLOBAL_TYPES:
+            # Check if this expression is an assignment
+            if child.type == "expression_statement":
+                if any(c.type in ("assignment", "augmented_assignment") for c in child.children):
+                    globals_nodes.append(child)
+            else:
+                globals_nodes.append(child)
+
+    # E. Emit File-Level Aggregated Chunks
     if imports_nodes:
-        import_codes = [ast.get_source_segment(source, n) or "" for n in imports_nodes]
-        imports_text = "\n".join(code.strip() for code in import_codes if code)
+        imports_text = "\n".join(get_node_text(n, source_bytes).strip() for n in imports_nodes)
         chunks.append({
             "code": imports_text,
             "metadata": {
@@ -211,8 +284,8 @@ def chunk_file(file_path: Path, target_size: int = TARGET_SIZE) -> list[dict]:
                 "file_path": str(file_path),
                 "name": f"{file_path.name}::imports",
                 "parent": None,
-                "start_line": imports_nodes[0].lineno,
-                "end_line": getattr(imports_nodes[-1], "end_lineno", imports_nodes[-1].lineno),
+                "start_line": imports_nodes[0].start_point[0] + 1,
+                "end_line": imports_nodes[-1].end_point[0] + 1,
                 "token_count": count_tokens(imports_text),
                 "chunk_index": 1,
                 "total_chunks": 1,
@@ -220,8 +293,7 @@ def chunk_file(file_path: Path, target_size: int = TARGET_SIZE) -> list[dict]:
         })
 
     if globals_nodes:
-        global_codes = [ast.get_source_segment(source, n) or "" for n in globals_nodes]
-        globals_text = "\n".join(code.strip() for code in global_codes if code)
+        globals_text = "\n".join(get_node_text(n, source_bytes).strip() for n in globals_nodes)
         chunks.append({
             "code": globals_text,
             "metadata": {
@@ -229,8 +301,8 @@ def chunk_file(file_path: Path, target_size: int = TARGET_SIZE) -> list[dict]:
                 "file_path": str(file_path),
                 "name": f"{file_path.name}::globals",
                 "parent": None,
-                "start_line": globals_nodes[0].lineno,
-                "end_line": getattr(globals_nodes[-1], "end_lineno", globals_nodes[-1].lineno),
+                "start_line": globals_nodes[0].start_point[0] + 1,
+                "end_line": globals_nodes[-1].end_point[0] + 1,
                 "token_count": count_tokens(globals_text),
                 "chunk_index": 1,
                 "total_chunks": 1,
@@ -241,18 +313,22 @@ def chunk_file(file_path: Path, target_size: int = TARGET_SIZE) -> list[dict]:
 
 
 def main():
-    if not TARGET_FILE.exists():
-        print(f"❌ File not found: {TARGET_FILE}")
+    target = TARGET_FILE
+    if len(sys.argv) > 1:
+        target = Path(sys.argv[1])
+
+    if not target.exists():
+        print(f"❌ File not found: {target}")
         return
 
     print("=" * 68)
-    print(f"✂️  AST Semantic Chunking Pipeline")
-    print(f"📄 Target File: {TARGET_FILE}")
+    print(f"🌳 Tree-Sitter Polyglot Semantic Chunking")
+    print(f"📄 Parsing: {target} ({target.suffix})")
     print("=" * 68)
 
-    chunks = chunk_file(TARGET_FILE, TARGET_SIZE)
+    chunks = chunk_with_tree_sitter(target, TARGET_SIZE)
 
-    # Save to temp.json
+    # Override temp.json
     OUTPUT_JSON.write_text(json.dumps(chunks, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # Terminal Dashboard
@@ -265,17 +341,16 @@ def main():
     for c_type, count in type_counts.items():
         print(f"   • {c_type:<16}: {count} chunk(s)")
 
-    print(f"\n💾 Saved full chunk payload to: {OUTPUT_JSON.name}")
+    print(f"\n💾 Overwrote full chunk payload to: {OUTPUT_JSON.resolve()}")
     print("\n🔍 Sample Overview of Extracted Chunks:")
     print("-" * 68)
     for c in chunks[:8]:
         m = c["metadata"]
         print(f"[{m['type'].upper():<14}] {m['name']:<35} ({m['token_count']} tok, lines {m['start_line']}–{m['end_line']})")
 
-    # Highlight any multi-chunk splits
     splits = [c for c in chunks if c["metadata"]["total_chunks"] > 1]
     if splits:
-        print("\n⚡ Statement-Split Functions:")
+        print("\n⚡ Statement-Split Functions (> 500 tokens):")
         for s in splits:
             m = s["metadata"]
             print(f"   • {m['name']} (part {m['chunk_index']}/{m['total_chunks']}) -> {m['token_count']} tokens")

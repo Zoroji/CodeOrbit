@@ -1,0 +1,19 @@
+# Core Parsing & Polyglot AST Engine
+tree-sitter>=0.22.0
+tree-sitter-python>=0.21.0
+tree-sitter-javascript>=0.21.0
+tree-sitter-typescript>=0.21.0
+
+# Tokenization & Text Processing
+tiktoken>=0.5.0
+
+# Networking & Ingestion
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Graph Engine
+networkx>=3.0
+
+# Backend API (Milestone 4)
+fastapi>=0.100.0
+uvicorn>=0.23.0

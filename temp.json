@@ -1,35 +1,5 @@
 [
   {
-    "code": "class SRTBlock:\n    index: int\n    start_time: str\n    end_time: str\n    text: str",
-    "metadata": {
-      "type": "class_overview",
-      "file_path": "test_extracted_repo\\Zoroji_Graph-RAG\\Simple_rag\\rag_pipeline.py",
-      "name": "SRTBlock",
-      "parent": null,
-      "methods": [],
-      "start_line": 30,
-      "end_line": 34,
-      "token_count": 26,
-      "chunk_index": 1,
-      "total_chunks": 1
-    }
-  },
-  {
-    "code": "class TextChunk:\n    chunk_id: int\n    text: str\n    start_time: str\n    end_time: str\n    char_start: int\n    char_end: int\n    source: str\n    token_count: int = 0",
-    "metadata": {
-      "type": "class_overview",
-      "file_path": "test_extracted_repo\\Zoroji_Graph-RAG\\Simple_rag\\rag_pipeline.py",
-      "name": "TextChunk",
-      "parent": null,
-      "methods": [],
-      "start_line": 37,
-      "end_line": 45,
-      "token_count": 52,
-      "chunk_index": 1,
-      "total_chunks": 1
-    }
-  },
-  {
     "code": "def parse_srt(file_path: str) -> List[SRTBlock]:\n    \"\"\"Parse .srt file into structured blocks.\"\"\"\n    content = Path(file_path).read_text(encoding=\"utf-8\", errors=\"replace\")\n    raw_blocks = re.split(r\"\\n\\s*\\n\", content.strip())\n    blocks = []\n\n    for raw in raw_blocks:\n        lines = raw.strip().splitlines()\n        if len(lines) < 3:\n            continue\n        try:\n            idx = int(lines[0].strip())\n        except ValueError:\n            continue\n\n        time_match = re.match(\n            r\"(\\d{2}:\\d{2}:\\d{2},\\d{3})\\s*-->\\s*(\\d{2}:\\d{2}:\\d{2},\\d{3})\",\n            lines[1].strip()\n        )\n        if not time_match:\n            continue\n\n        start_time = time_match.group(1).replace(\",\", \".\")\n        end_time   = time_match.group(2).replace(\",\", \".\")\n        text = \" \".join(lines[2:]).strip()\n        blocks.append(SRTBlock(index=idx, start_time=start_time, end_time=end_time, text=text))\n\n    return blocks",
     "metadata": {
       "type": "function",
@@ -72,7 +42,7 @@
     }
   },
   {
-    "code": "\"\"\"Sliding window chunking over reconstructed segments.\"\"\"\nif not segments:\n        return []\ntry:\n        import tiktoken\n        enc = tiktoken.get_encoding(\"cl100k_base\")\n        def count_tokens(t): return len(enc.encode(t))\n    except Exception:\n        def count_tokens(t): return len(t.split())\nall_text = \" \".join(s[\"text\"] for s in segments)\nwords    = all_text.split()\nif not words:\n        return []\nchar_to_seg: Dict[int, int] = {}\npos = 0\nfor i, seg in enumerate(segments):\n        for _ in range(len(seg[\"text\"]) + 1):\n            char_to_seg[pos] = i\n            pos += 1\n        pos += 1\nchunks: List[TextChunk] = []\nchunk_id = 0\ni = 0",
+    "code": "\"\"\"Sliding window chunking over reconstructed segments.\"\"\"\nif not segments:\n        return []\ntry:\n        import tiktoken\n        enc = tiktoken.get_encoding(\"cl100k_base\")\n        def count_tokens(t): return len(enc.encode(t))\n    except Exception:\n        def count_tokens(t): return len(t.split())\nall_text = \" \".join(s[\"text\"] for s in segments)\nwords    = all_text.split()\nif not words:\n        return []\n# Build a char→segment_index lookup for timestamp resolution\nchar_to_seg: Dict[int, int] = {}\npos = 0\nfor i, seg in enumerate(segments):\n        for _ in range(len(seg[\"text\"]) + 1):\n            char_to_seg[pos] = i\n            pos += 1\n        pos += 1  # space between segments\nchunks: List[TextChunk] = []\nchunk_id = 0\ni = 0",
     "metadata": {
       "type": "function",
       "file_path": "test_extracted_repo\\Zoroji_Graph-RAG\\Simple_rag\\rag_pipeline.py",
@@ -80,7 +50,7 @@
       "parent": null,
       "start_line": 141,
       "end_line": 225,
-      "token_count": 172,
+      "token_count": 189,
       "chunk_index": 1,
       "total_chunks": 2
     }
