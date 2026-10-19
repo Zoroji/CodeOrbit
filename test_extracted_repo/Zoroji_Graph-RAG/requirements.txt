@@ -1,0 +1,36 @@
+# Unified Project Dependencies for AI Podcast Intelligence Hub
+# Python 3.12 recommended
+
+# Streamlit UI & Visualizations
+streamlit>=1.40.0
+pandas>=2.0.0
+plotly>=5.18.0
+
+# LLM Providers & Environment
+groq>=0.18.0
+python-dotenv>=1.0.0
+
+# Vector, Lexical & Graph Retrieval
+chromadb>=0.4.0
+rank-bm25>=0.2.2
+networkx>=3.0
+
+# Local Embeddings & Reranking
+sentence-transformers>=3.0.0
+transformers>=4.40.0
+torch>=2.2.0
+
+# NLP & Entity Extraction
+spacy>=3.7.0
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+
+# Tokenization & Utilities
+numpy>=1.26.0
+tiktoken>=0.7.0
+tqdm>=4.66.0
+
+# Evaluation Framework (Optional / Evaluation page)
+ragas>=0.2.0
+langchain-groq>=0.2.0
+langchain-openai>=0.2.0
+datasets>=2.18.0

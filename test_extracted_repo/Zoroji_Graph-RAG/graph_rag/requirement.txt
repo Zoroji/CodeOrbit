@@ -1,0 +1,27 @@
+# GraphRAG Streamlit application — Python 3.12 recommended
+
+# UI
+streamlit==1.43.2
+pandas==2.2.3
+
+# Groq LLM API (summaries and chat answers)
+groq==0.23.1
+python-dotenv==1.1.0
+
+# Embeddings and reranking
+sentence-transformers==4.1.0
+transformers==4.51.3
+torch==2.6.0
+
+# Vector, keyword, and graph retrieval
+chromadb==1.5.1
+rank-bm25==0.2.2
+networkx==3.4.2
+
+# NLP entity extraction
+spacy==3.8.7
+
+# Utilities
+numpy==2.2.4
+tiktoken==0.9.0
+tqdm==4.67.1
