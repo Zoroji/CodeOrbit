@@ -1,8 +1,20 @@
 # Core Parsing & Polyglot AST Engine
 tree-sitter>=0.22.0
+
+# Universal Language Pack (Provides pre-compiled parsers for 370+ languages out of the box)
+tree-sitter-language-pack>=0.6.0
+
+# Individual Language Grammars (Alternative modular packages)
 tree-sitter-python>=0.21.0
 tree-sitter-javascript>=0.21.0
 tree-sitter-typescript>=0.21.0
+tree-sitter-go>=0.21.0
+tree-sitter-rust>=0.21.0
+tree-sitter-java>=0.21.0
+tree-sitter-cpp>=0.21.0
+tree-sitter-c-sharp>=0.21.0
+tree-sitter-ruby>=0.21.0
+tree-sitter-php>=0.21.0
 
 # Tokenization & Text Processing
 tiktoken>=0.5.0

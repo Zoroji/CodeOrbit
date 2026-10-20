@@ -1,5 +1,6 @@
 import sys
 import json
+import importlib
 from pathlib import Path
 
 # Ensure UTF-8 output on Windows terminal
@@ -10,24 +11,172 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# ─── Tree-sitter Language Bindings ────────────────────────────────────────────
-try:
-    from tree_sitter import Language, Parser
-    import tree_sitter_python
-    import tree_sitter_javascript
-    import tree_sitter_typescript
+# ─── Comprehensive Extension to Language Registry ─────────────────────────────
+# Maps file extensions to standard Tree-sitter language names
+EXTENSION_TO_LANG = {
+    # Python
+    ".py": "python",
+    ".pyi": "python",
+    # JavaScript & TypeScript
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".mts": "typescript",
+    ".cts": "typescript",
+    ".tsx": "tsx",
+    # Systems & Compiled Languages
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".cs": "c_sharp",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".swift": "swift",
+    ".scala": "scala",
+    # Scripting & Web Languages
+    ".rb": "ruby",
+    ".php": "php",
+    ".sh": "bash",
+    ".bash": "bash",
+    # Data & Markup Formats
+    ".sql": "sql",
+    ".html": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".md": "markdown",
+}
 
-    LANGUAGES = {
-        ".py": Language(tree_sitter_python.language()),
-        ".js": Language(tree_sitter_javascript.language()),
-        ".jsx": Language(tree_sitter_javascript.language()),
-        ".ts": Language(tree_sitter_typescript.language_typescript()),
-        ".tsx": Language(tree_sitter_typescript.language_tsx()),
-    }
-except ImportError as e:
-    print(f"❌ Missing required tree-sitter packages: {e}")
-    print("👉 Run: pip install -r requirements.txt")
-    sys.exit(1)
+# ─── Polyglot AST Syntax Node Maps ────────────────────────────────────────────
+# Generalized categories across Python, JS/TS, Go, Rust, Java, C++, C#, etc.
+IMPORT_NODE_TYPES = {
+    "import_statement",
+    "import_from_statement",
+    "import_declaration",
+    "use_declaration",
+    "using_directive",
+    "preproc_include",
+    "namespace_use_declaration",
+}
+
+CLASS_NODE_TYPES = {
+    "class_definition",
+    "class_declaration",
+    "struct_item",
+    "enum_item",
+    "trait_item",
+    "impl_item",
+    "type_declaration",
+    "class_specifier",
+    "struct_specifier",
+    "interface_declaration",
+    "protocol_declaration",
+    "record_declaration",
+    "module",
+}
+
+FUNCTION_NODE_TYPES = {
+    "function_definition",
+    "function_declaration",
+    "function_item",
+    "method_declaration",
+    "method_definition",
+    "constructor_declaration",
+    "arrow_function",
+    "singleton_method",
+}
+
+GLOBAL_VAR_TYPES = {
+    "expression_statement",
+    "lexical_declaration",
+    "variable_declaration",
+    "const_item",
+    "static_item",
+    "var_declaration",
+}
+
+TYPE_DEF_TYPES = {
+    "type_alias_declaration",
+    "type_spec",
+}
+
+# ─── Dynamic Tree-sitter Language Loader ──────────────────────────────────────
+_LOADED_LANGUAGES = {}
+_HAS_LANG_PACK = None
+
+def get_language_and_parser(extension: str):
+    """
+    Dynamically loads grammar and parser for any supported file extension.
+    1. Checks if tree-sitter-language-pack (370+ languages) is available.
+    2. Falls back to modular tree-sitter-<language> packages.
+    """
+    global _HAS_LANG_PACK
+
+    ext = extension.lower()
+    lang_name = EXTENSION_TO_LANG.get(ext)
+    if not lang_name:
+        raise ValueError(f"Unsupported file extension: '{ext}'")
+
+    if lang_name in _LOADED_LANGUAGES:
+        return _LOADED_LANGUAGES[lang_name]
+
+    from tree_sitter import Language, Parser
+
+    # Strategy A: Universal Language Pack (370+ languages)
+    if _HAS_LANG_PACK is not False:
+        try:
+            import tree_sitter_language_pack as tslp
+            _HAS_LANG_PACK = True
+            lang = tslp.get_language(lang_name)
+            parser = tslp.get_parser(lang_name)
+            _LOADED_LANGUAGES[lang_name] = (lang, parser)
+            return lang, parser
+        except ImportError:
+            _HAS_LANG_PACK = False
+
+    # Strategy B: Modular tree-sitter-<language> packages
+    try:
+        if lang_name == "typescript":
+            import tree_sitter_typescript as ts
+            lang = Language(ts.language_typescript())
+        elif lang_name == "tsx":
+            import tree_sitter_typescript as ts
+            lang = Language(ts.language_tsx())
+        elif lang_name == "c_sharp":
+            import tree_sitter_c_sharp as tscs
+            lang = Language(tscs.language())
+        else:
+            mod = importlib.import_module(f"tree_sitter_{lang_name}")
+            lang = Language(mod.language())
+
+        # Support both 0.22+ and older Parser API
+        try:
+            parser = Parser(lang)
+        except TypeError:
+            parser = Parser()
+            parser.set_language(lang)
+
+        _LOADED_LANGUAGES[lang_name] = (lang, parser)
+        return lang, parser
+
+    except ImportError:
+        raise RuntimeError(
+            f"Parser for language '{lang_name}' (extension '{ext}') is not installed.\n"
+            f"👉 Install the 370+ language bundle:  pip install tree-sitter-language-pack\n"
+            f"👉 Or install the individual grammar: pip install tree-sitter-{lang_name}"
+        )
+
 
 # ─── Token Counter ────────────────────────────────────────────────────────────
 try:
@@ -41,18 +190,7 @@ except Exception:
         return int(len(text.split()) * 1.3)
 
 TARGET_SIZE = 500
-TARGET_FILE = Path("test_extracted_repo/Zoroji_Graph-RAG/Simple_rag/rag_pipeline.py")
 OUTPUT_JSON = Path(__file__).parent / "temp.json"
-
-
-def get_parser(language) -> Parser:
-    """Initialize Tree-sitter Parser supporting both 0.22+ and older APIs."""
-    try:
-        return Parser(language)
-    except TypeError:
-        p = Parser()
-        p.set_language(language)
-        return p
 
 
 def get_node_text(node, source_bytes: bytes) -> str:
@@ -99,14 +237,18 @@ def make_definition_chunks(
     node,
     source_bytes: bytes,
     file_path: Path,
+    explicit_name: str | None = None,
     parent: str | None = None,
     target_size: int = TARGET_SIZE
 ) -> list[dict]:
     func_code = get_node_text(node, source_bytes)
-    name_node = node.child_by_field_name("name")
-    func_name = get_node_text(name_node, source_bytes) if name_node else "anonymous"
-    qual_name = f"{parent}.{func_name}" if parent else func_name
+    if explicit_name:
+        func_name = explicit_name
+    else:
+        name_node = node.child_by_field_name("name")
+        func_name = get_node_text(name_node, source_bytes) if name_node else "anonymous"
 
+    qual_name = f"{parent}.{func_name}" if parent else func_name
     start_line = node.start_point[0] + 1
     end_line = node.end_point[0] + 1
     tokens = count_tokens(func_code)
@@ -164,14 +306,13 @@ def make_definition_chunks(
     } for idx, chunk_text in enumerate(chunks, start=1)]
 
 
-# ─── Class Overview Builder ───────────────────────────────────────────────────
+# ─── Class & Struct Overview Builder ──────────────────────────────────────────
 def make_class_overview(node, source_bytes: bytes, file_path: Path) -> tuple[dict, list]:
-    """Extracts lightweight class overview and returns (overview_chunk, list_of_method_nodes)."""
     name_node = node.child_by_field_name("name")
-    class_name = get_node_text(name_node, source_bytes) if name_node else "UnnamedClass"
+    class_name = get_node_text(name_node, source_bytes) if name_node else "UnnamedType"
 
     body_node = node.child_by_field_name("body")
-    lines = [f"class {class_name}:"]
+    lines = [f"class/type {class_name}:"]
     method_nodes = []
     method_names = []
 
@@ -180,20 +321,16 @@ def make_class_overview(node, source_bytes: bytes, file_path: Path) -> tuple[dic
             if not child.is_named:
                 continue
 
-            # Python: function_definition | JS/TS: method_definition
-            if child.type in ("function_definition", "method_definition"):
+            if child.type in FUNCTION_NODE_TYPES:
                 method_nodes.append(child)
                 m_name_node = child.child_by_field_name("name")
                 m_name = get_node_text(m_name_node, source_bytes) if m_name_node else "method"
                 method_names.append(m_name)
-                # Signature: first line of method
                 sig_line = get_node_text(child, source_bytes).splitlines()[0].strip()
                 lines.append(f"    {sig_line} ...")
 
-            # Class docstring or data member
-            elif child.type in ("expression_statement", "lexical_declaration", "variable_declaration", "field_definition"):
+            elif child.type in GLOBAL_VAR_TYPES or child.type.endswith(("_field", "_definition", "specifier")):
                 txt = get_node_text(child, source_bytes).strip()
-                # If multi-line docstring, capture first line
                 if "\n" in txt:
                     txt = txt.splitlines()[0] + ' """...'
                 lines.append(f"    {txt}")
@@ -217,64 +354,101 @@ def make_class_overview(node, source_bytes: bytes, file_path: Path) -> tuple[dic
     return overview_chunk, method_nodes
 
 
-# ─── Main Polyglot Tree-Sitter Chunker ─────────────────────────────────────────
+# ─── Universal Syntax Node Classifier ─────────────────────────────────────────
+def process_syntax_node(node, source_bytes: bytes, file_path: Path, target_size: int = TARGET_SIZE):
+    effective_node = node
+
+    # Handle JS/TS export wrappers
+    if node.type == "export_statement":
+        named_children = [c for c in node.children if c.is_named]
+        if named_children:
+            effective_node = named_children[0]
+        else:
+            return "global", node
+
+    node_type = effective_node.type
+
+    # 1. Imports / Inclusions
+    if node_type in IMPORT_NODE_TYPES:
+        return "import", node
+
+    # 2. Classes, Structs, Traits, Protocols, Modules
+    if node_type in CLASS_NODE_TYPES:
+        return "class", node
+
+    # 3. Standard Functions & Methods
+    if node_type in FUNCTION_NODE_TYPES:
+        name_node = effective_node.child_by_field_name("name")
+        fn_name = get_node_text(name_node, source_bytes) if name_node else None
+        return "function", (node, fn_name)
+
+    # 4. Type Aliases & Interfaces
+    if node_type in TYPE_DEF_TYPES:
+        return "type", node
+
+    # 5. JS/TS Lexical & Variable Declarations (const / let / var)
+    if node_type in ("lexical_declaration", "variable_declaration"):
+        for declarator in effective_node.children:
+            if declarator.type == "variable_declarator":
+                val = declarator.child_by_field_name("value")
+                if val and val.type in ("arrow_function", "function_expression"):
+                    name_node = declarator.child_by_field_name("name")
+                    fn_name = get_node_text(name_node, source_bytes) if name_node else "anonymous"
+                    return "function", (node, fn_name)
+        return "global", node
+
+    # 6. Global Assignments / Constants
+    if node_type in GLOBAL_VAR_TYPES:
+        return "global", node
+
+    return "other", node
+
+
+# ─── Universal Polyglot Chunker ───────────────────────────────────────────────
 def chunk_with_tree_sitter(file_path: Path, target_size: int = TARGET_SIZE) -> list[dict]:
     suffix = file_path.suffix.lower()
-    language = LANGUAGES.get(suffix)
+    lang, parser = get_language_and_parser(suffix)
 
-    if language is None:
-        raise ValueError(f"Unsupported language extension: {suffix}")
-
-    parser = get_parser(language)
     source_bytes = file_path.read_bytes()
     tree = parser.parse(source_bytes)
     root = tree.root_node
 
     imports_nodes = []
     globals_nodes = []
+    types_nodes = []
     chunks = []
-
-    # Node types mapping across Python & JavaScript/TypeScript
-    IMPORT_TYPES = {"import_statement", "import_from_statement"}
-    GLOBAL_TYPES = {"expression_statement", "lexical_declaration", "variable_declaration"}
-    CLASS_TYPES = {"class_definition", "class_declaration"}
-    FUNCTION_TYPES = {"function_definition", "function_declaration", "arrow_function"}
 
     for child in root.children:
         if not child.is_named:
             continue
 
-        # A. Imports
-        if child.type in IMPORT_TYPES:
-            imports_nodes.append(child)
+        category, payload = process_syntax_node(child, source_bytes, file_path, target_size)
 
-        # B. Classes
-        elif child.type in CLASS_TYPES:
-            class_overview, methods = make_class_overview(child, source_bytes, file_path)
+        if category == "import":
+            imports_nodes.append(payload)
+
+        elif category == "class":
+            class_overview, methods = make_class_overview(payload, source_bytes, file_path)
             chunks.append(class_overview)
             c_name = class_overview["metadata"]["name"]
-
             for m_node in methods:
                 chunks.extend(
                     make_definition_chunks(m_node, source_bytes, file_path, parent=c_name, target_size=target_size)
                 )
 
-        # C. Top-level Functions
-        elif child.type in FUNCTION_TYPES:
+        elif category == "function":
+            func_node, explicit_name = payload
             chunks.extend(
-                make_definition_chunks(child, source_bytes, file_path, parent=None, target_size=target_size)
+                make_definition_chunks(func_node, source_bytes, file_path, explicit_name=explicit_name, parent=None, target_size=target_size)
             )
 
-        # D. Global Variables / Assignments
-        elif child.type in GLOBAL_TYPES:
-            # Check if this expression is an assignment
-            if child.type == "expression_statement":
-                if any(c.type in ("assignment", "augmented_assignment") for c in child.children):
-                    globals_nodes.append(child)
-            else:
-                globals_nodes.append(child)
+        elif category == "type":
+            types_nodes.append(payload)
 
-    # E. Emit File-Level Aggregated Chunks
+        elif category == "global":
+            globals_nodes.append(payload)
+
+    # File-Level Aggregated Chunks
     if imports_nodes:
         imports_text = "\n".join(get_node_text(n, source_bytes).strip() for n in imports_nodes)
         chunks.append({
@@ -287,6 +461,23 @@ def chunk_with_tree_sitter(file_path: Path, target_size: int = TARGET_SIZE) -> l
                 "start_line": imports_nodes[0].start_point[0] + 1,
                 "end_line": imports_nodes[-1].end_point[0] + 1,
                 "token_count": count_tokens(imports_text),
+                "chunk_index": 1,
+                "total_chunks": 1,
+            }
+        })
+
+    if types_nodes:
+        types_text = "\n\n".join(get_node_text(n, source_bytes).strip() for n in types_nodes)
+        chunks.append({
+            "code": types_text,
+            "metadata": {
+                "type": "types",
+                "file_path": str(file_path),
+                "name": f"{file_path.name}::types",
+                "parent": None,
+                "start_line": types_nodes[0].start_point[0] + 1,
+                "end_line": types_nodes[-1].end_point[0] + 1,
+                "token_count": count_tokens(types_text),
                 "chunk_index": 1,
                 "total_chunks": 1,
             }
@@ -313,7 +504,7 @@ def chunk_with_tree_sitter(file_path: Path, target_size: int = TARGET_SIZE) -> l
 
 
 def main():
-    target = TARGET_FILE
+    target = Path("test.tsx")
     if len(sys.argv) > 1:
         target = Path(sys.argv[1])
 
@@ -321,14 +512,17 @@ def main():
         print(f"❌ File not found: {target}")
         return
 
+    ext = target.suffix.lower()
+    lang_name = EXTENSION_TO_LANG.get(ext, "unknown")
+
     print("=" * 68)
-    print(f"🌳 Tree-Sitter Polyglot Semantic Chunking")
-    print(f"📄 Parsing: {target} ({target.suffix})")
+    print(f"🌐 Universal Polyglot Tree-Sitter Chunker")
+    print(f"📄 Parsing: {target} (Language: {lang_name}, Extension: {ext})")
     print("=" * 68)
 
     chunks = chunk_with_tree_sitter(target, TARGET_SIZE)
 
-    # Override temp.json
+    # Save payload to temp.json
     OUTPUT_JSON.write_text(json.dumps(chunks, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # Terminal Dashboard
@@ -344,16 +538,10 @@ def main():
     print(f"\n💾 Overwrote full chunk payload to: {OUTPUT_JSON.resolve()}")
     print("\n🔍 Sample Overview of Extracted Chunks:")
     print("-" * 68)
-    for c in chunks[:8]:
+    for c in chunks:
         m = c["metadata"]
-        print(f"[{m['type'].upper():<14}] {m['name']:<35} ({m['token_count']} tok, lines {m['start_line']}–{m['end_line']})")
-
-    splits = [c for c in chunks if c["metadata"]["total_chunks"] > 1]
-    if splits:
-        print("\n⚡ Statement-Split Functions (> 500 tokens):")
-        for s in splits:
-            m = s["metadata"]
-            print(f"   • {m['name']} (part {m['chunk_index']}/{m['total_chunks']}) -> {m['token_count']} tokens")
+        status = f"chunk {m['chunk_index']}/{m['total_chunks']}" if m['total_chunks'] > 1 else "whole"
+        print(f"[{m['type'].upper():<10}] {m['name']:<35} ({m['token_count']} tok, lines {m['start_line']}–{m['end_line']}) [{status}]")
 
     print("=" * 68)
 
