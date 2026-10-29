@@ -243,3 +243,116 @@ YIELD event: complete -> "completed" (ready for Qdrant & NetworkX)
 
 END
 ```
+
+
+---
+
+########### 3. PGVECTOR & INDEXING ###########
+
+We use **PostgreSQL with the `pgvector` extension** and `psycopg_pool.ConnectionPool` for production-grade vector storage and high-concurrency similarity search. Code embeddings are generated using **CodeRankEmbed** (768 dimensions, normalized).
+
+### PSEUDO CODE: PGVECTOR STORE & DENSE RETRIEVAL
+
+```python
+START
+
+# STEP 1: INITIALIZATION & CONNECTION POOL SETUP
+READ conninfo from DATABASE_URL (or default "postgresql://codeorbit:codeorbit@localhost:5433/codeorbit")
+
+DEFINE function configure_connection(conn):
+    CALL register_vector(conn)  # Teaches psycopg how to serialize/deserialize numpy arrays <-> pgvector
+
+INITIALIZE ConnectionPool:
+    conninfo = conninfo
+    min_size = 1
+    max_size = 10
+    configure = configure_connection
+    open = True
+
+# STEP 2: SCHEMA INITIALIZATION
+ACQUIRE conn FROM pool:
+    EXECUTE SQL:
+        CREATE EXTENSION IF NOT EXISTS vector;
+
+        CREATE TABLE IF NOT EXISTS code_chunks (
+            id          TEXT PRIMARY KEY,
+            source      TEXT NOT NULL,
+            chunk_type  TEXT,
+            name        TEXT,
+            file        TEXT,
+            start_line  INTEGER,
+            end_line    INTEGER,
+            token_count INTEGER,
+            code        TEXT,
+            metadata    JSONB DEFAULT '{}',
+            embedding   vector(768)
+        );
+
+        # HNSW multi-layer graph index for ultra-fast cosine similarity search
+        CREATE INDEX IF NOT EXISTS idx_chunks_hnsw
+            ON code_chunks USING hnsw (embedding vector_cosine_ops);
+
+        # B-Tree index to filter by repo shelf in O(log N)
+        CREATE INDEX IF NOT EXISTS idx_chunks_source
+            ON code_chunks (source);
+
+# STEP 3: INDEXING CHUNKS (index_chunks)
+FUNCTION index_chunks(chunks, source_id):
+    IF chunks is empty:
+        RETURN
+
+    ACQUIRE conn FROM pool:
+        IF EXISTS row WHERE source = source_id:
+            PRINT "Source already indexed. Skipping."
+            RETURN
+
+    # Generate 768-dim normalized embeddings with CodeRankEmbed
+    EXTRACT code_texts FROM chunks
+    ADD prefix "search_document: " TO EACH code_text
+    embeddings = MODEL.encode(code_texts, normalize_embeddings=True)
+
+    # Atomic batch insertion
+    ACQUIRE conn FROM pool:
+        START conn.transaction():
+            FOR EACH (chunk, embedding) IN (chunks, embeddings):
+                EXECUTE SQL:
+                    INSERT INTO code_chunks (
+                        id, source, chunk_type, name, file,
+                        start_line, end_line, token_count,
+                        code, metadata, embedding
+                    ) VALUES (...)
+                    ON CONFLICT (id) DO UPDATE SET
+                        code = EXCLUDED.code,
+                        metadata = EXCLUDED.metadata,
+                        embedding = EXCLUDED.embedding;
+
+    PRINT "Indexed chunks into pgvector."
+
+# STEP 4: DENSE SEARCHING (dense_search)
+FUNCTION dense_search(query, source_id, top_k=20):
+    # Embed search query with Nomic prefix
+    query_emb = MODEL.encode("search_query: " + query, normalize_embeddings=True)
+
+    ACQUIRE conn FROM pool:
+        EXECUTE SQL:
+            SELECT id, code, metadata, 1 - (embedding <=> query_emb) AS similarity
+            FROM code_chunks
+            WHERE (source_id IS NULL OR source = source_id)
+            ORDER BY embedding <=> query_emb
+            LIMIT top_k;
+
+        FETCH matching rows
+        RETURN list of (code, metadata, similarity)
+
+END
+```
+
+
+#psql is run on docker get your docker up 
+# initalial command
+# docker run --name codeorbit-pgvector -e POSTGRES_USER=codeorbit -e POSTGRES_PASSWORD=codeorbit -e POSTGRES_DB=codeorbit -p 5433:5432 -v codeorbit_pgdata:/var/lib/postgresql/data -d pgvector/pgvector:pg16
+
+# after that use for restarting
+# docker start codeorbit-pgvector
+# to enter terminal forpsql
+# docker exec -it codeorbit-pgvector psql -U codeorbit -d codeorbit

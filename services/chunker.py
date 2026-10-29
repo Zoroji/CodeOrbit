@@ -409,7 +409,11 @@ def chunk_single_file(
             )
         )
 
-    return chunks
+    # ponytail: drop delimiter noise and micro-chunks (<10 tokens). Upgrade: AST min-statement heuristic.
+    return [
+        c for c in chunks
+        if count_tokens(c["code"].strip()) >= 10 and any(ch.isalnum() for ch in c["code"])
+    ]
 
 
 def chunk_repository(repo_dir: Path, repo_owner: str, repo_name: str, target_size: int = 500) -> list[dict]:

@@ -29,3 +29,20 @@ networkx>=3.0
 # Backend API (Milestone 4)
 fastapi>=0.100.0
 uvicorn>=0.23.0
+
+# PostgreSQL + pgvector
+psycopg[binary,pool]>=3.1.0
+pgvector>=0.3.0
+numpy>=1.24.0
+
+# Embeddings
+sentence-transformers>=2.2.0
+einops>=0.7.0
+
+# PostgreSQL + pgvector
+psycopg[binary]>=3.1.0       # Modern PostgreSQL driver (psycopg 3, async-capable)
+pgvector>=0.3.0               # Python pgvector integration
+
+# Embeddings
+sentence-transformers>=2.2.0
+einops>=0.7.0  # For loading CodeRankEmbed
