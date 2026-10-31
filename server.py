@@ -21,6 +21,8 @@ if sys.platform == "win32":
 from services.zipball import extract_github_zipball, parse_github_url
 from services.chunker import chunk_repository
 from services.pg_vector_store import PgVectorStore
+from services.BM25K import BM25Index
+from services.reranker import reciprocal_rank_fusion, Reranker
 
 load_dotenv()
 
@@ -44,6 +46,8 @@ REPOS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Production connection pool vector store
 vector_store = PgVectorStore()
+bm25_index = BM25Index()
+reranker = Reranker()
 
 
 @app.get("/api/health")
@@ -57,10 +61,14 @@ async def search(
     repo_id: str | None = Query(None, description="Optional repository id filter"),
     top_k: int = Query(5, description="Number of top matches to return")
 ):
-    results = await asyncio.to_thread(vector_store.dense_search, query, repo_id, top_k)
+    dense_hits = await asyncio.to_thread(vector_store.dense_search, query, repo_id, top_k * 2)
+    sparse_hits = await asyncio.to_thread(bm25_index.search, query, top_k * 2)
+    fused_hits = reciprocal_rank_fusion(dense_hits, sparse_hits)
+    candidates = fused_hits[:top_k * 2] if fused_hits else (dense_hits or sparse_hits)
+    final_hits = await asyncio.to_thread(reranker.rerank, query, candidates, top_k) if candidates else []
     return [
-        {"code": code, "metadata": meta, "similarity": round(float(score), 4)}
-        for code, meta, score in results
+        {"code": code, "metadata": meta, "score": round(float(score), 4)}
+        for code, meta, score in final_hits
     ]
 
 
@@ -106,12 +114,12 @@ async def stream_ingest(url: str = Query(..., description="Public GitHub reposit
 
             yield f"event: progress\ndata: {json.dumps({'status': 'chunked', 'message': f'Generated {len(chunks)} chunks', 'total_chunks': len(chunks), 'repo_id': repo_id})}\n\n"
 
-            # 4. Vector Embedding & Indexing into pgvector
-            yield f"event: progress\ndata: {json.dumps({'status': 'indexing', 'message': f'Embedding & storing {len(chunks)} chunks in pgvector...', 'repo_id': repo_id})}\n\n"
+            yield f"event: progress\ndata: {json.dumps({'status': 'indexing', 'message': f'Indexing {len(chunks)} chunks in pgvector & BM25...', 'repo_id': repo_id})}\n\n"
 
             await asyncio.to_thread(vector_store.index_chunks, chunks, repo_id)
+            await asyncio.to_thread(bm25_index.build, chunks)
 
-            yield f"event: progress\ndata: {json.dumps({'status': 'indexed', 'message': f'Indexed into pgvector with CodeRankEmbed', 'repo_id': repo_id})}\n\n"
+            yield f"event: progress\ndata: {json.dumps({'status': 'indexed', 'message': 'Indexed in pgvector & BM25', 'repo_id': repo_id})}\n\n"
 
             # 5. Complete
             yield f"event: complete\ndata: {json.dumps({'status': 'completed', 'repo_id': repo_id, 'total_chunks': len(chunks)})}\n\n"
@@ -131,41 +139,48 @@ async def stream_ingest(url: str = Query(..., description="Public GitHub reposit
 
 
 def run_dry_run(target_url: str = "https://github.com/Zoroji/Graph-RAG.git"):
-    """
-    Direct dry-run pipeline:
-    Downloads repo -> Polyglot chunks -> Embeds with CodeRankEmbed -> Stores in pgvector -> Executes a dense search.
-    """
     print("=" * 70)
-    print(f"🚀 CodeOrbit Ingestion Dry-Run Pipeline")
-    print(f"📂 Target: {target_url}")
+    print(f"CodeOrbit Hybrid Ingestion Dry-Run Pipeline")
+    print(f"Target: {target_url}")
     print("=" * 70)
 
     owner, repo = parse_github_url(target_url)
     repo_id = f"{owner}_{repo}"
 
-    print(f"\n[1/4] Extracting repository {owner}/{repo}...")
+    print(f"\n[1/5] Extracting repository {owner}/{repo}...")
     dest_dir, _, _, was_cached = extract_github_zipball(target_url, REPOS_DIR)
-    print(f"   ✓ Extracted to {dest_dir} (cached: {was_cached})")
+    print(f"   Extracted to {dest_dir} (cached: {was_cached})")
 
-    print(f"\n[2/4] Chunking repository with Tree-sitter...")
+    print(f"\n[2/5] Chunking repository with Tree-sitter...")
     chunks = chunk_repository(dest_dir, owner, repo, 500)
-    print(f"   ✓ Created {len(chunks)} semantic chunks")
+    print(f"   Created {len(chunks)} semantic chunks")
 
     shutil.rmtree(dest_dir, ignore_errors=True)
 
-    print(f"\n[3/4] Indexing chunks into pgvector (ConnectionPool)...")
+    print(f"\n[3/5] Indexing chunks into pgvector & BM25...")
     vector_store.index_chunks(chunks, repo_id)
-    print(f"   ✓ Stored in PostgreSQL with CodeRankEmbed embeddings")
+    bm25_index.build(chunks)
+    print(f"   Indexed in pgvector and BM25")
 
-    print(f"\n[4/4] Testing Dense Semantic Search...")
+    print(f"\n[4/5] Running Dense (pgvector) + Sparse (BM25) Retrieval...")
     sample_query = "How is knowledge graph constructed or retrieved?"
-    print(f"   🔍 Query: '{sample_query}'")
-    hits = vector_store.dense_search(sample_query, source_id=repo_id, top_k=3)
+    print(f"   Query: '{sample_query}'")
 
-    print(f"\n✨ Top {len(hits)} Search Results from pgvector:")
+    dense_hits = vector_store.dense_search(sample_query, source_id=repo_id, top_k=5)
+    sparse_hits = bm25_index.search(sample_query, top_k=5)
+    print(f"   Dense Hits: {len(dense_hits)} | Sparse Hits: {len(sparse_hits)}")
+
+    fused_hits = reciprocal_rank_fusion(dense_hits, sparse_hits)
+    print(f"   Fused Candidates (RRF): {len(fused_hits)}")
+
+    print(f"\n[5/5] Cross-Encoder Reranking top candidates...")
+    candidates = fused_hits[:5] if fused_hits else (dense_hits or sparse_hits)
+    final_hits = reranker.rerank(sample_query, candidates, top_n=3)
+
+    print(f"\nTop {len(final_hits)} Reranked Results (Cross-Encoder):")
     print("-" * 70)
-    for i, (code, meta, score) in enumerate(hits, 1):
-        print(f"[{i}] Similarity: {score:.4f} | Type: {meta.get('type')} | Name: {meta.get('name')}")
+    for i, (code, meta, score) in enumerate(final_hits, 1):
+        print(f"[{i}] Cross-Encoder Score: {score:.4f} | Type: {meta.get('type')} | Name: {meta.get('name')}")
         print(f"    File: {meta.get('file')} (lines {meta.get('start_line')}-{meta.get('end_line')})")
         preview = code.strip().splitlines()
         first_few = "\n".join(f"      {line}" for line in preview[:4])
@@ -174,7 +189,7 @@ def run_dry_run(target_url: str = "https://github.com/Zoroji/Graph-RAG.git"):
             print(f"      ... ({len(preview) - 4} more lines)")
         print("-" * 70)
 
-    print("\n✅ Dry run completed successfully!")
+    print("\nDry run completed successfully!")
 
 
 if __name__ == "__main__":
